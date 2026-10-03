@@ -1,0 +1,24 @@
+# Cau hinh RIENG cho phan Chat khi chay o may minh (profile chat-dev).
+# Bat bang: Active profiles = chat-dev (IntelliJ) hoac -Dspring-boot.run.profiles=chat-dev (Maven).
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/hrconnect
+    username: hr
+    password: hr123
+  jpa:
+    # Bang do Flyway tao (db/migration). Hibernate KHONG tu tao/sua bang.
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    show-sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+chat:
+  ws:
+    allowed-origins: "*"
+
+logging:
+  level:
+    com.hrconnect.chat: DEBUG

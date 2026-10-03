@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat 1-1 – trang thử</title>
+<!-- Trang thu cho che do chat-dev. Mo 2 tab, moi tab chon 1 user khac nhau roi nhan tin qua lai. -->
+<script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+<style>
+  :root { --bg:#f5f6f8; --panel:#fff; --line:#e3e5e8; --text:#1d2129; --muted:#6b7280; --me:#2563eb; --other:#eef0f3; --danger:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--text); background:var(--bg); }
+  header { display:flex; gap:8px; align-items:center; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header strong { margin-right:8px; }
+  select, input, button { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button { cursor:pointer; }
+  button.primary { background:var(--me); color:#fff; border-color:var(--me); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { color:var(--muted); }
+  main { display:grid; grid-template-columns: 280px 1fr; height: calc(100vh - 54px); }
+  aside { border-right:1px solid var(--line); background:var(--panel); overflow:auto; }
+  .new { padding:10px; border-bottom:1px solid var(--line); display:flex; gap:6px; }
+  .new select { flex:1; min-width:0; }
+  .conv { padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .conv.active { background:#eaf1ff; }
+  .conv .name { font-weight:600; display:flex; justify-content:space-between; gap:6px; }
+  .conv .last { color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .badge { background:var(--danger); color:#fff; border-radius:10px; padding:0 7px; font-size:12px; }
+  section { display:flex; flex-direction:column; min-width:0; }
+  #title { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); font-weight:600; }
+  #typing { color:var(--muted); font-weight:400; font-style:italic; margin-left:8px; }
+  #messages { flex:1; overflow:auto; padding:12px 16px; display:flex; flex-direction:column; gap:4px; }
+  .msg { max-width:70%; padding:6px 10px; border-radius:12px; background:var(--other); align-self:flex-start; word-wrap:break-word; white-space:pre-wrap; }
+  .msg.me { background:var(--me); color:#fff; align-self:flex-end; }
+  .msg.recalled { font-style:italic; opacity:.65; }
+  .meta { font-size:11px; color:var(--muted); align-self:flex-end; display:flex; gap:8px; }
+  .meta.other { align-self:flex-start; }
+  .meta a { color:var(--danger); cursor:pointer; }
+  #more { align-self:center; margin-bottom:8px; }
+  form { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--line); background:var(--panel); }
+  form input { flex:1; }
+  .empty { color:var(--muted); padding:24px; text-align:center; }
+  @media (max-width: 640px) { main { grid-template-columns: 1fr; } aside { max-height: 35vh; } }
+</style>
+</head>
+<body>
+<header>
+  <strong>Chat 1-1 (chat-dev)</strong>
+  <label>Tôi là <select id="me"></select></label>
+  <button id="connect" class="primary">Kết nối</button>
+  <span id="status">Chưa kết nối</span>
+</header>
+<main>
+  <aside>
+    <div class="new">
+      <select id="newUser"></select>
+      <button id="newBtn" disabled>Nhắn tin</button>
+    </div>
+    <div id="convs"><div class="empty">Kết nối để xem hội thoại</div></div>
+  </aside>
+  <section>
+    <div id="title">Chọn một hội thoại<span id="typing"></span></div>
+    <div id="messages"></div>
+    <form id="form">
+      <input id="input" placeholder="Nhập tin nhắn..." autocomplete="off" disabled maxlength="4000">
+      <button class="primary" id="send" disabled>Gửi</button>
+    </form>
+  </section>
+</main>
+<script>
+const API = '/api/v1/chats';
+const $ = id => document.getElementById(id);
+const state = { me: null, client: null, users: [], convs: [], activeId: null, messages: [], nextBefore: null, otherLastRead: null };
+let typingTimer = null, typingSent = false, typingHideTimer = null;
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', 'X-User-Id': state.me, ...(options.headers || {}) }
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || ('HTTP ' + res.status));
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function nameOf(id) {
+  const u = state.users.find(x => x.user.id === id);
+  return u ? u.user.fullName : id;
+}
+
+async function loadUsers() {
+  const res = await fetch(API + '/dev/users');
+  state.users = await res.json();
+  $('me').innerHTML = state.users.filter(u => u.active)
+    .map(u => `<option value="${u.user.id}">${u.user.fullName}</option>`).join('');
+  // tab thu 2 tu chon user thu 2 cho nhanh
+  const saved = sessionStorage.getItem('chat-me');
+  if (saved) $('me').value = saved;
+}
+
+function fillNewUserSelect() {
+  $('newUser').innerHTML = state.users.filter(u => u.user.id !== state.me)
+    .map(u => `<option value="${u.user.id}">${u.user.fullName}${u.active ? '' : ' (bị khoá)'}</option>`).join('');
+}
+
+function connect() {
+  if (state.client) state.client.deactivate();
+  state.me = $('me').value;
+  sessionStorage.setItem('chat-me', state.me);
+  fillNewUserSelect();
+  $('status').textContent = 'Đang kết nối...';
+  const client = new StompJs.Client({
+    brokerURL: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws',
+    connectHeaders: { 'X-User-Id': state.me },
+    reconnectDelay: 3000,
+    onConnect: () => {
+      $('status').textContent = 'Đã kết nối: ' + nameOf(state.me);
+      client.subscribe('/user/queue/chat.messages', f => onMessage(JSON.parse(f.body)));
+      client.subscribe('/user/queue/chat.recalled', f => onRecalled(JSON.parse(f.body)));
+      client.subscribe('/user/queue/chat.read', f => onRead(JSON.parse(f.body)));
+      client.subscribe('/user/queue/chat.typing', f => onTyping(JSON.parse(f.body)));
+      client.subscribe('/user/queue/chat.errors', f => alert('Lỗi: ' + JSON.parse(f.body).message));
+      $('newBtn').disabled = false;
+      refreshConversations();
+    },
+    onStompError: f => { $('status').textContent = 'Lỗi kết nối: ' + (f.headers.message || ''); },
+    onWebSocketClose: () => { if ($('status').textContent.startsWith('Đã')) $('status').textContent = 'Mất kết nối, đang thử lại...'; }
+  });
+  client.activate();
+  state.client = client;
+  state.activeId = null;
+  renderMessages();
+}
+
+async function refreshConversations() {
+  state.convs = await api('/conversations');
+  renderConversations();
+}
+
+function renderConversations() {
+  const box = $('convs');
+  if (!state.convs.length) { box.innerHTML = '<div class="empty">Chưa có hội thoại nào</div>'; return; }
+  box.innerHTML = '';
+  for (const c of state.convs) {
+    const div = document.createElement('div');
+    div.className = 'conv' + (c.id === state.activeId ? ' active' : '');
+    const last = c.lastMessage ? (c.lastMessage.recalled ? 'Tin nhắn đã được thu hồi'
+      : (c.lastMessage.senderId === state.me ? 'Bạn: ' : '') + c.lastMessage.content) : '';
+    div.innerHTML = `<div class="name"><span></span>${c.unreadCount ? `<span class="badge">${c.unreadCount}</span>` : ''}</div><div class="last"></div>`;
+    div.querySelector('.name span').textContent = c.otherUser.fullName;
+    div.querySelector('.last').textContent = last;
+    div.onclick = () => openConversation(c);
+    box.appendChild(div);
+  }
+}
+
+async function startNew() {
+  const conv = await api('/conversations', { method: 'POST', body: JSON.stringify({ otherUserId: $('newUser').value }) })
+    .catch(e => alert(e.message));
+  if (conv) openConversation(conv);
+}
+
+async function openConversation(conv) {
+  state.activeId = conv.id;
+  state.other = conv.otherUser;
+  state.otherLastRead = conv.otherLastReadMessageId;
+  $('title').firstChild.textContent = conv.otherUser.fullName;
+  $('typing').textContent = '';
+  $('input').disabled = false; $('send').disabled = false; $('input').focus();
+  const page = await api(`/conversations/${conv.id}/messages?limit=20`);
+  state.messages = page.items;
+  state.nextBefore = page.nextBefore;
+  renderMessages(true);
+  markReadLatest();
+  renderConversations();
+}
+
+async function loadMore() {
+  const page = await api(`/conversations/${state.activeId}/messages?limit=20&before=${state.nextBefore}`);
+  state.messages = page.items.concat(state.messages);
+  state.nextBefore = page.nextBefore;
+  renderMessages(false);
+}
+
+function renderMessages(scrollToEnd = true) {
+  const box = $('messages');
+  box.innerHTML = '';
+  if (!state.activeId) { box.innerHTML = '<div class="empty">Chưa chọn hội thoại</div>'; return; }
+  if (state.nextBefore) {
+    const b = document.createElement('button'); b.id = 'more'; b.textContent = 'Tải tin cũ hơn'; b.onclick = loadMore; box.appendChild(b);
+  }
+  // Tin cua toi moi nhat ma nguoi kia da doc toi -> hien "Da xem"
+  const readIdx = state.messages.findIndex(m => m.id === state.otherLastRead);
+  let seenIdx = -1;
+  state.messages.forEach((m, i) => { if (m.senderId === state.me && i <= readIdx) seenIdx = i; });
+
+  state.messages.forEach((m, i) => {
+    const mine = m.senderId === state.me;
+    const div = document.createElement('div');
+    div.className = 'msg' + (mine ? ' me' : '') + (m.recalled ? ' recalled' : '');
+    div.textContent = m.recalled ? 'Tin nhắn đã được thu hồi' : m.content;
+    box.appendChild(div);
+    const meta = document.createElement('div');
+    meta.className = 'meta' + (mine ? '' : ' other');
+    const time = document.createElement('span');
+    time.textContent = new Date(m.createdAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    meta.appendChild(time);
+    if (mine && !m.recalled && Date.now() - new Date(m.createdAt) < 24 * 3600e3) {
+      const a = document.createElement('a'); a.textContent = 'Thu hồi';
+      a.onclick = () => { if (confirm('Thu hồi tin nhắn này?')) publish('/app/chat.recall', { messageId: m.id }); };
+      meta.appendChild(a);
+    }
+    if (i === seenIdx) { const s = document.createElement('span'); s.textContent = 'Đã xem'; meta.appendChild(s); }
+    box.appendChild(meta);
+  });
+  if (scrollToEnd) box.scrollTop = box.scrollHeight;
+}
+
+function publish(destination, body) {
+  state.client.publish({ destination, body: JSON.stringify(body) });
+}
+
+function markReadLatest() {
+  const fromOther = state.messages.filter(m => m.senderId !== state.me);
+  if (fromOther.length) publish('/app/chat.read', { conversationId: state.activeId, messageId: fromOther[fromOther.length - 1].id });
+}
+
+function onMessage(m) {
+  if (m.conversationId === state.activeId) {
+    const i = state.messages.findIndex(x => x.clientMsgId && x.clientMsgId === m.clientMsgId && x.pending);
+    if (i >= 0) state.messages[i] = m; else state.messages.push(m);
+    if (m.senderId !== state.me) { $('typing').textContent = ''; markReadLatest(); }
+    renderMessages();
+  }
+  refreshConversations();
+}
+
+function onRecalled(m) {
+  const i = state.messages.findIndex(x => x.id === m.id);
+  if (i >= 0) { state.messages[i] = m; renderMessages(false); }
+  refreshConversations();
+}
+
+function onRead(e) {
+  if (e.conversationId === state.activeId) { state.otherLastRead = e.lastReadMessageId; renderMessages(false); }
+  else refreshConversations();
+}
+
+function onTyping(e) {
+  if (e.conversationId !== state.activeId) return;
+  $('typing').textContent = e.typing ? 'đang nhập...' : '';
+  clearTimeout(typingHideTimer);
+  if (e.typing) typingHideTimer = setTimeout(() => { $('typing').textContent = ''; }, 5000);
+}
+
+$('form').onsubmit = e => {
+  e.preventDefault();
+  const content = $('input').value;
+  if (!content.trim() || !state.activeId) return;
+  const clientMsgId = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  // Hien ngay tin "dang gui", server tra ve se thay bang tin that (khop qua clientMsgId)
+  state.messages.push({ id: clientMsgId, clientMsgId, pending: true, senderId: state.me, content, createdAt: new Date().toISOString() });
+  renderMessages();
+  publish('/app/chat.send', { conversationId: state.activeId, content, clientMsgId });
+  $('input').value = '';
+  sendTyping(false);
+};
+
+function sendTyping(typing) {
+  if (!state.activeId || typingSent === typing) return;
+  typingSent = typing;
+  publish('/app/chat.typing', { conversationId: state.activeId, typing });
+}
+
+$('input').oninput = () => {
+  sendTyping(true);
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => sendTyping(false), 2000);
+};
+$('connect').onclick = connect;
+$('newBtn').onclick = startNew;
+loadUsers();
+renderMessages();
+</script>
+</body>
+</html>

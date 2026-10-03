@@ -1,4 +1,4 @@
-package vn.crewlink.crewlink;
+package com.hrconnect;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
