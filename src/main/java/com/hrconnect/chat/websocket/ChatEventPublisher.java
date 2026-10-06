@@ -3,6 +3,7 @@ package com.hrconnect.chat.websocket;
 import com.hrconnect.chat.dto.MessageDto;
 import com.hrconnect.chat.dto.ReadEvent;
 import com.hrconnect.chat.dto.TypingEvent;
+import com.hrconnect.chat.push.ChatPushService;
 import org.springframework.messaging.simp.SimpMessageSendingOperations;
 import org.springframework.stereotype.Component;
 
@@ -18,6 +19,7 @@ import java.util.UUID;
  *   <li>/user/queue/chat.typing    – nguoi kia dang nhap</li>
  *   <li>/user/queue/chat.errors    – loi khi gui qua WebSocket</li>
  * </ul>
+ * Tin moi con duoc day thong bao (Firebase) toi nguoi nhan, ke ca khi ho khong mo trang.
  */
 @Component
 public class ChatEventPublisher {
@@ -29,13 +31,16 @@ public class ChatEventPublisher {
     public static final String ERRORS = "/queue/chat.errors";
 
     private final SimpMessageSendingOperations messaging;
+    private final ChatPushService push;
 
-    public ChatEventPublisher(SimpMessageSendingOperations messaging) {
+    public ChatEventPublisher(SimpMessageSendingOperations messaging, ChatPushService push) {
         this.messaging = messaging;
+        this.push = push;
     }
 
     public void messageCreated(MessageDto message) {
         sendToBoth(message, MESSAGES);
+        push.notifyNewMessage(message);
     }
 
     public void messageRecalled(MessageDto message) {

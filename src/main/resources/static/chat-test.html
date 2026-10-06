@@ -6,6 +6,9 @@
 <title>Chat 1-1 – trang thử</title>
 <!-- Trang thu cho che do chat-dev. Mo 2 tab, moi tab chon 1 user khac nhau roi nhan tin qua lai. -->
 <script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+<!-- Firebase: nhan thong bao day khi co tin moi (tuy chon, chi bat khi server tra ve cau hinh) -->
+<script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging-compat.js"></script>
 <style>
   :root { --bg:#f5f6f8; --panel:#fff; --line:#e3e5e8; --text:#1d2129; --muted:#6b7280; --me:#2563eb; --other:#eef0f3; --danger:#dc2626; }
   * { box-sizing: border-box; }
@@ -40,6 +43,11 @@
   form { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--line); background:var(--panel); }
   form input { flex:1; }
   .empty { color:var(--muted); padding:24px; text-align:center; }
+  #toasts { position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:10; max-width:min(340px, calc(100vw - 32px)); }
+  .toast { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--me); border-radius:8px; padding:10px 12px; box-shadow:0 6px 20px rgba(0,0,0,.12); cursor:pointer; animation:slide .2s ease-out; }
+  .toast .t { font-weight:600; }
+  .toast .b { color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  @keyframes slide { from { transform:translateY(12px); opacity:0; } }
   @media (max-width: 640px) { main { grid-template-columns: 1fr; } aside { max-height: 35vh; } }
 </style>
 </head>
@@ -48,8 +56,10 @@
   <strong>Chat 1-1 (chat-dev)</strong>
   <label>Tôi là <select id="me"></select></label>
   <button id="connect" class="primary">Kết nối</button>
+  <button id="pushBtn" hidden>🔔 Bật thông báo</button>
   <span id="status">Chưa kết nối</span>
 </header>
+<div id="toasts"></div>
 <main>
   <aside>
     <div class="new">
@@ -72,6 +82,9 @@ const API = '/api/v1/chats';
 const $ = id => document.getElementById(id);
 const state = { me: null, client: null, users: [], convs: [], activeId: null, messages: [], nextBefore: null, otherLastRead: null };
 let typingTimer = null, typingSent = false, typingHideTimer = null;
+// Mo tu thong bao: /chat-test.html?me=<user>&c=<conversationId>&with=<nguoi gui>
+const startParams = new URLSearchParams(location.search);
+let pendingOpen = startParams.get('c') ? { conversationId: startParams.get('c'), senderId: startParams.get('with') } : null;
 
 async function api(path, options = {}) {
   const res = await fetch(API + path, {
@@ -96,8 +109,9 @@ async function loadUsers() {
   $('me').innerHTML = state.users.filter(u => u.active)
     .map(u => `<option value="${u.user.id}">${u.user.fullName}</option>`).join('');
   // tab thu 2 tu chon user thu 2 cho nhanh
-  const saved = sessionStorage.getItem('chat-me');
+  const saved = startParams.get('me') || sessionStorage.getItem('chat-me');
   if (saved) $('me').value = saved;
+  if (startParams.get('me')) connect();
 }
 
 function fillNewUserSelect() {
@@ -123,7 +137,11 @@ function connect() {
       client.subscribe('/user/queue/chat.typing', f => onTyping(JSON.parse(f.body)));
       client.subscribe('/user/queue/chat.errors', f => alert('Lỗi: ' + JSON.parse(f.body).message));
       $('newBtn').disabled = false;
-      refreshConversations();
+      refreshConversations().then(() => {
+        if (pendingOpen) { openById(pendingOpen.conversationId, pendingOpen.senderId); pendingOpen = null; }
+      });
+      if (push.config && push.config.enabled) updatePushButton();
+      if (window.Notification && Notification.permission === 'granted') enablePush(false);
     },
     onStompError: f => { $('status').textContent = 'Lỗi kết nối: ' + (f.headers.message || ''); },
     onWebSocketClose: () => { if ($('status').textContent.startsWith('Đã')) $('status').textContent = 'Mất kết nối, đang thử lại...'; }
@@ -177,6 +195,12 @@ async function openConversation(conv) {
   renderConversations();
 }
 
+async function openById(conversationId, otherUserId) {
+  const conv = state.convs.find(c => c.id === conversationId)
+    || (otherUserId && await api('/conversations', { method: 'POST', body: JSON.stringify({ otherUserId }) }).catch(() => null));
+  if (conv) openConversation(conv);
+}
+
 async function loadMore() {
   const page = await api(`/conversations/${state.activeId}/messages?limit=20&before=${state.nextBefore}`);
   state.messages = page.items.concat(state.messages);
@@ -228,6 +252,10 @@ function markReadLatest() {
 }
 
 function onMessage(m) {
+  // Dang mo trang nhung khong xem hoi thoai nay -> hien thong bao noi trong trang
+  if (m.senderId !== state.me && !document.hidden && m.conversationId !== state.activeId) {
+    showToast(nameOf(m.senderId), m.content, () => openById(m.conversationId, m.senderId));
+  }
   if (m.conversationId === state.activeId) {
     const i = state.messages.findIndex(x => x.clientMsgId && x.clientMsgId === m.clientMsgId && x.pending);
     if (i >= 0) state.messages[i] = m; else state.messages.push(m);
@@ -279,9 +307,75 @@ $('input').oninput = () => {
   clearTimeout(typingTimer);
   typingTimer = setTimeout(() => sendTyping(false), 2000);
 };
+function showToast(title, body, onClick) {
+  const div = document.createElement('div');
+  div.className = 'toast';
+  div.innerHTML = '<div class="t"></div><div class="b"></div>';
+  div.querySelector('.t').textContent = title;
+  div.querySelector('.b').textContent = body || '';
+  div.onclick = () => { div.remove(); onClick(); };
+  $('toasts').appendChild(div);
+  setTimeout(() => div.remove(), 6000);
+}
+
+// ---------------------------------------------------------------- thong bao day (Firebase)
+// Luu y: moi trinh duyet chi co MOT token. Test 2 nguoi thi dung 2 trinh duyet khac nhau
+// (vd. Chrome va Edge/Firefox), khong dung 2 tab cung trinh duyet.
+const push = { config: null, messaging: null, registration: null, token: null };
+
+async function loadPushConfig() {
+  if (!('serviceWorker' in navigator) || !window.Notification || !window.firebase) return;
+  push.config = await fetch(API + '/push/config').then(r => r.json()).catch(() => null);
+  if (!push.config || !push.config.enabled) return;
+  $('pushBtn').hidden = false;
+  updatePushButton();
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'chat.open' && e.data.recipientId === state.me) openById(e.data.conversationId, e.data.senderId);
+  });
+}
+
+function updatePushButton() {
+  const p = Notification.permission;
+  $('pushBtn').textContent = p === 'granted' ? (push.token ? '🔔 Đã bật thông báo' : '🔔 Bật thông báo')
+    : p === 'denied' ? '🔕 Thông báo bị chặn' : '🔔 Bật thông báo';
+  $('pushBtn').disabled = p === 'denied' || !!push.token || !state.me;
+}
+
+async function enablePush(ask) {
+  if (!push.config || !push.config.enabled || !state.me) return;
+  try {
+    if (ask && await Notification.requestPermission() !== 'granted') { updatePushButton(); return; }
+    const fb = push.config.firebase;
+    if (!push.messaging) {
+      firebase.initializeApp({ apiKey: fb.apiKey, authDomain: fb.authDomain, projectId: fb.projectId,
+        storageBucket: fb.storageBucket, messagingSenderId: fb.messagingSenderId, appId: fb.appId });
+      push.messaging = firebase.messaging();
+      const swParams = new URLSearchParams({ apiKey: fb.apiKey, authDomain: fb.authDomain, projectId: fb.projectId,
+        storageBucket: fb.storageBucket, messagingSenderId: fb.messagingSenderId, appId: fb.appId });
+      push.registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js?' + swParams);
+      // Tab nay dang mo (co the dang an) ma van nhan push -> tab dang an thi hien thong bao he thong
+      push.messaging.onMessage(payload => {
+        const d = payload.data || {};
+        if (d.kind === 'chat.message' && document.hidden) {
+          push.registration.showNotification(d.title, { body: d.body, tag: d.conversationId, renotify: true, data: d });
+        }
+      });
+    }
+    push.token = await push.messaging.getToken({ vapidKey: fb.vapidKey, serviceWorkerRegistration: push.registration });
+    // Gui lai moi lan doi user: token chuyen sang nguoi dang dung trinh duyet nay
+    await api('/push/tokens', { method: 'POST', body: JSON.stringify({ token: push.token, platform: 'WEB' }) });
+  } catch (e) {
+    console.error(e);
+    push.token = null;
+    if (ask) alert('Không bật được thông báo: ' + e.message);
+  }
+  updatePushButton();
+}
+
+$('pushBtn').onclick = () => enablePush(true);
 $('connect').onclick = connect;
 $('newBtn').onclick = startNew;
-loadUsers();
+loadPushConfig().finally(loadUsers);
 renderMessages();
 </script>
 </body>

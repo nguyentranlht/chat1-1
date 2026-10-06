@@ -18,6 +18,21 @@ spring:
 chat:
   ws:
     allowed-origins: "*"
+  push:
+    # File JSON service account (Firebase Console > Project settings > Service accounts).
+    # BI MAT: de ngoai thu muc project, truyen qua bien moi truong FIREBASE_CREDENTIALS.
+    # De trong = khong gui push (chat van chay binh thuong).
+    credentials-path: ${FIREBASE_CREDENTIALS:}
+    # Cau hinh Firebase phia trinh duyet (khong bi mat).
+    web:
+      api-key: AIzaSyAolVzKTik2k4pFumthonzpQVcVKXWAlvg
+      auth-domain: flutter-demo-e61df.firebaseapp.com
+      project-id: flutter-demo-e61df
+      storage-bucket: flutter-demo-e61df.firebasestorage.app
+      messaging-sender-id: "141296345223"
+      app-id: 1:141296345223:web:d7be6d5a4f986d04abd822
+      # Project settings > Cloud Messaging > Web Push certificates > Key pair
+      vapid-key: ${FIREBASE_VAPID_KEY:}
 
 logging:
   level:
