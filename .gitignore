@@ -31,3 +31,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Node (khong dung, Firebase web nap qua CDN) ###
+node_modules/
+
+### Khoa bi mat Firebase (service account) - KHONG commit ###
+*firebase-adminsdk*.json
+firebase-service-account*.json
